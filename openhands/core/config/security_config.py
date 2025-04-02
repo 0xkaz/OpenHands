@@ -1,10 +1,7 @@
-from dataclasses import dataclass, fields
-
-from openhands.core.config.config_utils import get_field_info
+from pydantic import BaseModel, Field, ValidationError
 
 
-@dataclass
-class SecurityConfig:
+class SecurityConfig(BaseModel):
     """Configuration for security related functionalities.
 
     Attributes:
@@ -12,29 +9,29 @@ class SecurityConfig:
         security_analyzer: The security analyzer to use.
     """
 
-    confirmation_mode: bool = False
-    security_analyzer: str | None = None
+    confirmation_mode: bool = Field(default=False)
+    security_analyzer: str | None = Field(default=None)
 
-    def defaults_to_dict(self) -> dict:
-        """Serialize fields to a dict for the frontend, including type hints, defaults, and whether it's optional."""
-        dict = {}
-        for f in fields(self):
-            dict[f.name] = get_field_info(f)
-        return dict
-
-    def __str__(self):
-        attr_str = []
-        for f in fields(self):
-            attr_name = f.name
-            attr_value = getattr(self, f.name)
-
-            attr_str.append(f'{attr_name}={repr(attr_value)}')
-
-        return f"SecurityConfig({', '.join(attr_str)})"
+    model_config = {'extra': 'forbid'}
 
     @classmethod
-    def from_dict(cls, security_config_dict: dict) -> 'SecurityConfig':
-        return cls(**security_config_dict)
+    def from_toml_section(cls, data: dict) -> dict[str, 'SecurityConfig']:
+        """
+        Create a mapping of SecurityConfig instances from a toml dictionary representing the [security] section.
 
-    def __repr__(self):
-        return self.__str__()
+        The configuration is built from all keys in data.
+
+        Returns:
+            dict[str, SecurityConfig]: A mapping where the key "security" corresponds to the [security] configuration
+        """
+
+        # Initialize the result mapping
+        security_mapping: dict[str, SecurityConfig] = {}
+
+        # Try to create the configuration instance
+        try:
+            security_mapping['security'] = cls.model_validate(data)
+        except ValidationError as e:
+            raise ValueError(f'Invalid security configuration: {e}')
+
+        return security_mapping

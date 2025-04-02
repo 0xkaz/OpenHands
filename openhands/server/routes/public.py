@@ -1,6 +1,8 @@
 import warnings
+from typing import Any
 
-import requests
+import httpx
+from fastapi import APIRouter
 
 from openhands.security.options import SecurityAnalyzers
 
@@ -8,23 +10,18 @@ with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     import litellm
 
-from fastapi import (
-    APIRouter,
-)
-
 from openhands.controller.agent import Agent
 from openhands.core.config import LLMConfig
 from openhands.core.logger import openhands_logger as logger
 from openhands.llm import bedrock
-from openhands.server.shared import config, openhands_config
+from openhands.server.shared import config, server_config
 
 app = APIRouter(prefix='/api/options')
 
 
-@app.get('/models')
+@app.get('/models', response_model=list[str])
 async def get_litellm_models() -> list[str]:
-    """
-    Get all models supported by LiteLLM.
+    """Get all models supported by LiteLLM.
 
     This function combines models from litellm and Bedrock, removing any
     error-prone Bedrock models.
@@ -35,7 +32,7 @@ async def get_litellm_models() -> list[str]:
     ```
 
     Returns:
-        list: A sorted list of unique model names.
+        list[str]: A sorted list of unique model names.
     """
     litellm_model_list = litellm.model_list + list(litellm.model_cost.keys())
     litellm_model_list_without_bedrock = bedrock.remove_error_modelId(
@@ -51,8 +48,8 @@ async def get_litellm_models() -> list[str]:
     ):
         bedrock_model_list = bedrock.list_foundation_models(
             llm_config.aws_region_name,
-            llm_config.aws_access_key_id,
-            llm_config.aws_secret_access_key,
+            llm_config.aws_access_key_id.get_secret_value(),
+            llm_config.aws_secret_access_key.get_secret_value(),
         )
     model_list = litellm_model_list_without_bedrock + bedrock_model_list
     for llm_config in config.llms.values():
@@ -63,20 +60,18 @@ async def get_litellm_models() -> list[str]:
         if ollama_base_url:
             ollama_url = ollama_base_url.strip('/') + '/api/tags'
             try:
-                ollama_models_list = requests.get(ollama_url, timeout=3).json()[
-                    'models'
-                ]
+                ollama_models_list = httpx.get(ollama_url, timeout=3).json()['models']
                 for model in ollama_models_list:
                     model_list.append('ollama/' + model['name'])
                 break
-            except requests.exceptions.RequestException as e:
+            except httpx.HTTPError as e:
                 logger.error(f'Error getting OLLAMA models: {e}')
 
     return list(sorted(set(model_list)))
 
 
-@app.get('/agents')
-async def get_agents():
+@app.get('/agents', response_model=list[str])
+async def get_agents() -> list[str]:
     """Get all agents supported by LiteLLM.
 
     To get the agents:
@@ -85,14 +80,13 @@ async def get_agents():
     ```
 
     Returns:
-        list: A sorted list of agent names.
+        list[str]: A sorted list of agent names.
     """
-    agents = sorted(Agent.list_agents())
-    return agents
+    return sorted(Agent.list_agents())
 
 
-@app.get('/security-analyzers')
-async def get_security_analyzers():
+@app.get('/security-analyzers', response_model=list[str])
+async def get_security_analyzers() -> list[str]:
     """Get all supported security analyzers.
 
     To get the security analyzers:
@@ -101,15 +95,16 @@ async def get_security_analyzers():
     ```
 
     Returns:
-        list: A sorted list of security analyzer names.
+        list[str]: A sorted list of security analyzer names.
     """
     return sorted(SecurityAnalyzers.keys())
 
 
-@app.get('/config')
-async def get_config():
-    """
-    Get current config
-    """
+@app.get('/config', response_model=dict[str, Any])
+async def get_config() -> dict[str, Any]:
+    """Get current config.
 
-    return openhands_config.get_config()
+    Returns:
+        dict[str, Any]: The current server configuration.
+    """
+    return server_config.get_config()

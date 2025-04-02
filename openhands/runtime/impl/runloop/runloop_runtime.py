@@ -40,7 +40,7 @@ class RunloopRuntime(ActionExecutionClient):
         self.devbox: DevboxView | None = None
         self.config = config
         self.runloop_api_client = Runloop(
-            bearer_token=config.runloop_api_key,
+            bearer_token=config.runloop_api_key.get_secret_value(),
         )
         self.container_name = CONTAINER_NAME_PREFIX + sid
         super().__init__(
@@ -87,13 +87,14 @@ class RunloopRuntime(ActionExecutionClient):
         # Add some additional commands based on our image
         # NB: start off as root, action_execution_server will ultimately choose user but expects all context
         # (ie browser) to be installed as root
-        start_command = (
+        # Convert start_command list to a single command string with additional setup
+        start_command_str = (
             'export MAMBA_ROOT_PREFIX=/openhands/micromamba && '
             'cd /openhands/code && '
-            + '/openhands/micromamba/bin/micromamba run -n openhands poetry config virtualenvs.path /openhands/poetry && '
+            '/openhands/micromamba/bin/micromamba run -n openhands poetry config virtualenvs.path /openhands/poetry && '
             + ' '.join(start_command)
         )
-        entrypoint = f"sudo bash -c '{start_command}'"
+        entrypoint = f"sudo bash -c '{start_command_str}'"
 
         devbox = self.runloop_api_client.devboxes.create(
             entrypoint=entrypoint,

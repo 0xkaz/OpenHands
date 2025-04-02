@@ -55,6 +55,11 @@ The core configuration options are defined in the `[core]` section of the `confi
   - Default: `"./trajectories"`
   - Description: Path to store trajectories (can be a folder or a file). If it's a folder, the trajectories will be saved in a file named with the session id name and .json extension, in that folder.
 
+- `replay_trajectory_path`
+  - Type: `str`
+  - Default: `""`
+  - Description: Path to load a trajectory and replay. If given, must be a path to the trajectory file in JSON format. The actions in the trajectory file would be replayed first before any user instruction is executed.
+
 ### File Store
 - `file_store_path`
   - Type: `str`
@@ -121,7 +126,7 @@ The core configuration options are defined in the `[core]` section of the `confi
 
 - `runtime`
   - Type: `str`
-  - Default: `"eventstream"`
+  - Default: `"docker"`
   - Description: Runtime environment
 
 - `default_agent`
@@ -192,21 +197,6 @@ For development setups, you can also define custom named LLM configurations. See
   - Default: `""`
   - Description: Custom LLM provider
 
-### Embeddings
-- `embedding_base_url`
-  - Type: `str`
-  - Default: `""`
-  - Description: Embedding API base URL
-
-- `embedding_deployment_name`
-  - Type: `str`
-  - Default: `""`
-  - Description: Embedding deployment name
-
-- `embedding_model`
-  - Type: `str`
-  - Default: `"local"`
-  - Description: Embedding model to use
 
 ### Message Handling
 - `max_message_chars`
@@ -291,23 +281,6 @@ For development setups, you can also define custom named LLM configurations. See
 
 The agent configuration options are defined in the `[agent]` and `[agent.<agent_name>]` sections of the `config.toml` file.
 
-### Microagent Configuration
-- `micro_agent_name`
-  - Type: `str`
-  - Default: `""`
-  - Description: Name of the micro agent to use for this agent
-
-### Memory Configuration
-- `memory_enabled`
-  - Type: `bool`
-  - Default: `false`
-  - Description: Whether long-term memory (embeddings) is enabled
-
-- `memory_max_threads`
-  - Type: `int`
-  - Default: `3`
-  - Description: The maximum number of threads indexing at the same time for embeddings
-
 ### LLM Configuration
 - `llm_config`
   - Type: `str`
@@ -334,6 +307,11 @@ The agent configuration options are defined in the `[agent]` and `[agent.<agent_
   - Type: `bool`
   - Default: `false`
   - Description: Whether Jupyter is enabled in the action space
+
+- `enable_history_truncation`
+  - Type: `bool`
+  - Default: `true`
+  - Description: Whether history should be truncated to continue the session when hitting LLM context length limit
 
 ### Microagent Usage
 - `enable_prompt_extensions`
@@ -374,6 +352,11 @@ To use these with the docker command, pass in `-e SANDBOX_<option>`. Example: `-
   - Type: `bool`
   - Default: `false`
   - Description: Use host network
+
+- `runtime_binding_address`
+  - Type: `str`
+  - Default: `0.0.0.0`
+  - Description: The binding address for the runtime ports.  It specifies which network interface on the host machine Docker should bind the runtime ports to.
 
 ### Linting and Plugins
 - `enable_auto_lint`

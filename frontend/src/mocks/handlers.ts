@@ -5,17 +5,31 @@ import {
   ResultSet,
 } from "#/api/open-hands.types";
 import { DEFAULT_SETTINGS } from "#/services/settings";
+import { STRIPE_BILLING_HANDLERS } from "./billing-handlers";
+import { ApiSettings, PostApiSettings } from "#/types/settings";
+import { GitUser } from "#/types/git";
 
-export const MOCK_USER_PREFERENCES = {
-  settings: {
-    llm_model: DEFAULT_SETTINGS.LLM_MODEL,
-    llm_base_url: DEFAULT_SETTINGS.LLM_BASE_URL,
-    llm_api_key: DEFAULT_SETTINGS.LLM_API_KEY,
-    agent: DEFAULT_SETTINGS.AGENT,
-    language: DEFAULT_SETTINGS.LANGUAGE,
-    confirmation_mode: DEFAULT_SETTINGS.CONFIRMATION_MODE,
-    security_analyzer: DEFAULT_SETTINGS.SECURITY_ANALYZER,
-  },
+export const MOCK_DEFAULT_USER_SETTINGS: ApiSettings | PostApiSettings = {
+  llm_model: DEFAULT_SETTINGS.LLM_MODEL,
+  llm_base_url: DEFAULT_SETTINGS.LLM_BASE_URL,
+  llm_api_key: DEFAULT_SETTINGS.LLM_API_KEY,
+  agent: DEFAULT_SETTINGS.AGENT,
+  language: DEFAULT_SETTINGS.LANGUAGE,
+  confirmation_mode: DEFAULT_SETTINGS.CONFIRMATION_MODE,
+  security_analyzer: DEFAULT_SETTINGS.SECURITY_ANALYZER,
+  remote_runtime_resource_factor:
+    DEFAULT_SETTINGS.REMOTE_RUNTIME_RESOURCE_FACTOR,
+  provider_tokens_set: DEFAULT_SETTINGS.PROVIDER_TOKENS_SET,
+  enable_default_condenser: DEFAULT_SETTINGS.ENABLE_DEFAULT_CONDENSER,
+  enable_sound_notifications: DEFAULT_SETTINGS.ENABLE_SOUND_NOTIFICATIONS,
+  user_consents_to_analytics: DEFAULT_SETTINGS.USER_CONSENTS_TO_ANALYTICS,
+  provider_tokens: DEFAULT_SETTINGS.PROVIDER_TOKENS,
+};
+
+const MOCK_USER_PREFERENCES: {
+  settings: ApiSettings | PostApiSettings | null;
+} = {
+  settings: null,
 };
 
 const conversations: Conversation[] = [
@@ -115,7 +129,6 @@ const openHandsHandlers = [
 
     const url = new URL(request.url);
     const file = url.searchParams.get("file")?.toString();
-
     if (file) {
       return HttpResponse.json({ code: `Content of ${file}` });
     }
@@ -134,15 +147,16 @@ const openHandsHandlers = [
 ];
 
 export const handlers = [
+  ...STRIPE_BILLING_HANDLERS,
   ...openHandsHandlers,
-  http.get("/api/github/repositories", () =>
+  http.get("/api/user/repositories", () =>
     HttpResponse.json([
       { id: 1, full_name: "octocat/hello-world" },
       { id: 2, full_name: "octocat/earth" },
     ]),
   ),
-  http.get("https://api.github.com/user", () => {
-    const user: GitHubUser = {
+  http.get("/api/user/info", () => {
+    const user: GitUser = {
       id: 1,
       login: "octocat",
       avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4",
@@ -160,27 +174,49 @@ export const handlers = [
     HttpResponse.json(null, { status: 200 }),
   ),
   http.get("/api/options/config", () => {
+    const mockSaas = import.meta.env.VITE_MOCK_SAAS === "true";
+
     const config: GetConfigResponse = {
-      APP_MODE: "oss",
+      APP_MODE: mockSaas ? "saas" : "oss",
       GITHUB_CLIENT_ID: "fake-github-client-id",
       POSTHOG_CLIENT_KEY: "fake-posthog-client-key",
+      STRIPE_PUBLISHABLE_KEY: "",
+      FEATURE_FLAGS: {
+        ENABLE_BILLING: mockSaas,
+        HIDE_LLM_SETTINGS: mockSaas,
+      },
     };
 
     return HttpResponse.json(config);
   }),
-  http.get("/api/settings", async () =>
-    HttpResponse.json(MOCK_USER_PREFERENCES.settings),
-  ),
+  http.get("/api/settings", async () => {
+    await delay();
+
+    const { settings } = MOCK_USER_PREFERENCES;
+
+    if (!settings) return HttpResponse.json(null, { status: 404 });
+
+    if (Object.keys(settings.provider_tokens_set).length > 0)
+      settings.provider_tokens_set = { github: false, gitlab: false };
+
+    return HttpResponse.json(settings);
+  }),
   http.post("/api/settings", async ({ request }) => {
     const body = await request.json();
 
     if (body) {
-      MOCK_USER_PREFERENCES.settings = {
+      let newSettings: Partial<PostApiSettings> = {};
+      if (typeof body === "object") {
+        newSettings = { ...body };
+      }
+
+      const fullSettings = {
+        ...MOCK_DEFAULT_USER_SETTINGS,
         ...MOCK_USER_PREFERENCES.settings,
-        // @ts-expect-error - We know this is a settings object
-        ...body,
+        ...newSettings,
       };
 
+      MOCK_USER_PREFERENCES.settings = fullSettings;
       return HttpResponse.json(null, { status: 200 });
     }
 
@@ -264,5 +300,13 @@ export const handlers = [
     }
 
     return HttpResponse.json(null, { status: 404 });
+  }),
+
+  http.post("/api/logout", () => HttpResponse.json(null, { status: 200 })),
+
+  http.post("/api/reset-settings", async () => {
+    await delay();
+    MOCK_USER_PREFERENCES.settings = { ...MOCK_DEFAULT_USER_SETTINGS };
+    return HttpResponse.json(null, { status: 200 });
   }),
 ];

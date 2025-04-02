@@ -23,7 +23,9 @@ class AsyncLLM(LLM):
         self._async_completion = partial(
             self._call_acompletion,
             model=self.config.model,
-            api_key=self.config.api_key,
+            api_key=self.config.api_key.get_secret_value()
+            if self.config.api_key
+            else None,
             base_url=self.config.base_url,
             api_version=self.config.api_version,
             custom_llm_provider=self.config.custom_llm_provider,
@@ -32,6 +34,7 @@ class AsyncLLM(LLM):
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             drop_params=self.config.drop_params,
+            seed=self.config.seed,
         )
 
         async_completion_unwrapped = self._async_completion

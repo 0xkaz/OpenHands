@@ -10,6 +10,8 @@ FILES_TO_IGNORE = [
     '.DS_Store',
     'node_modules/',
     '__pycache__/',
+    'lost+found/',
+    '.vscode/',
 ]
 
 

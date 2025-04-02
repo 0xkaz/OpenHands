@@ -4,8 +4,9 @@ import time
 import traceback
 import uuid
 from enum import Enum
+from typing import Any
 
-import bashlex
+import bashlex  # type: ignore
 import libtmux
 
 from openhands.core.logger import openhands_logger as logger
@@ -19,12 +20,12 @@ from openhands.events.observation.commands import (
 from openhands.utils.shutdown_listener import should_continue
 
 
-def split_bash_commands(commands):
+def split_bash_commands(commands: str) -> list[str]:
     if not commands.strip():
         return ['']
     try:
         parsed = bashlex.parse(commands)
-    except (bashlex.errors.ParsingError, NotImplementedError):
+    except (bashlex.errors.ParsingError, NotImplementedError, TypeError):
         logger.debug(
             f'Failed to parse bash commands\n'
             f'[input]: {commands}\n'
@@ -82,7 +83,7 @@ def escape_bash_special_chars(command: str) -> str:
         parts = []
         last_pos = 0
 
-        def visit_node(node):
+        def visit_node(node: Any) -> None:
             nonlocal last_pos
             if (
                 node.kind == 'redirect'
@@ -144,7 +145,7 @@ def escape_bash_special_chars(command: str) -> str:
         remaining = command[last_pos:]
         parts.append(remaining)
         return ''.join(parts)
-    except (bashlex.errors.ParsingError, NotImplementedError):
+    except (bashlex.errors.ParsingError, NotImplementedError, TypeError):
         logger.debug(
             f'Failed to parse bash commands for special characters escape\n'
             f'[input]: {command}\n'
@@ -175,25 +176,35 @@ class BashSession:
         work_dir: str,
         username: str | None = None,
         no_change_timeout_seconds: int = 30,
+        max_memory_mb: int | None = None,
     ):
         self.NO_CHANGE_TIMEOUT_SECONDS = no_change_timeout_seconds
         self.work_dir = work_dir
         self.username = username
         self._initialized = False
+        self.max_memory_mb = max_memory_mb
 
-    def initialize(self):
+    def initialize(self) -> None:
         self.server = libtmux.Server()
-        window_command = '/bin/bash'
-        if self.username:
+        _shell_command = '/bin/bash'
+        if self.username in ['root', 'openhands']:
             # This starts a non-login (new) shell for the given user
-            window_command = f'su {self.username} -'
+            _shell_command = f'su {self.username} -'
 
+        # FIXME: we will introduce memory limit using sysbox-runc in coming PR
+        # # otherwise, we are running as the CURRENT USER (e.g., when running LocalRuntime)
+        # if self.max_memory_mb is not None:
+        #     window_command = (
+        #         f'prlimit --as={self.max_memory_mb * 1024 * 1024} {_shell_command}'
+        #     )
+        # else:
+        window_command = _shell_command
+
+        logger.debug(f'Initializing bash session with command: {window_command}')
         session_name = f'openhands-{self.username}-{uuid.uuid4()}'
         self.session = self.server.new_session(
             session_name=session_name,
-            window_name='bash',
-            window_command=window_command,
-            start_directory=self.work_dir,
+            start_directory=self.work_dir,  # This parameter is supported by libtmux
             kill_session=True,
             x=1000,
             y=1000,
@@ -206,8 +217,9 @@ class BashSession:
         # We need to create a new pane because the initial pane's history limit is (default) 2000
         _initial_window = self.session.attached_window
         self.window = self.session.new_window(
+            window_name='bash',
             window_shell=window_command,
-            start_directory=self.work_dir,
+            start_directory=self.work_dir,  # This parameter is supported by libtmux
         )
         self.pane = self.window.attached_pane
         logger.debug(f'pane: {self.pane}; history_limit: {self.session.history_limit}')
@@ -230,7 +242,7 @@ class BashSession:
         self._cwd = os.path.abspath(self.work_dir)
         self._initialized = True
 
-    def __del__(self):
+    def __del__(self) -> None:
         """Ensure the session is closed when the object is destroyed."""
         self.close()
 
@@ -245,7 +257,7 @@ class BashSession:
         )
         return content
 
-    def close(self):
+    def close(self) -> None:
         """Clean up the session."""
         if self._closed:
             return
@@ -253,7 +265,7 @@ class BashSession:
         self._closed = True
 
     @property
-    def cwd(self):
+    def cwd(self) -> str:
         return self._cwd
 
     def _is_special_key(self, command: str) -> bool:
@@ -262,7 +274,7 @@ class BashSession:
         _command = command.strip()
         return _command.startswith('C-') and len(_command) == 3
 
-    def _clear_screen(self):
+    def _clear_screen(self) -> None:
         """Clear the tmux pane screen and history."""
         self.pane.send_keys('C-l', enter=False)
         time.sleep(0.1)
@@ -413,7 +425,7 @@ class BashSession:
             metadata=metadata,
         )
 
-    def _ready_for_next_command(self):
+    def _ready_for_next_command(self) -> None:
         """Reset the content buffer for a new command."""
         # Clear the current content
         self._clear_screen()
@@ -461,29 +473,35 @@ class BashSession:
         # Strip the command of any leading/trailing whitespace
         logger.debug(f'RECEIVED ACTION: {action}')
         command = action.command.strip()
-        is_special_key = self._is_special_key(command)
+        is_input: bool = action.is_input
 
-        # Handle when prev command is hard timeout
-
-        if command == '' and self.prev_status not in {
+        # If the previous command is not completed, we need to check if the command is empty
+        if self.prev_status not in {
             BashCommandStatus.CONTINUE,
             BashCommandStatus.NO_CHANGE_TIMEOUT,
             BashCommandStatus.HARD_TIMEOUT,
         }:
-            return CmdOutputObservation(
-                content='ERROR: No previous command to continue from. '
-                + 'Previous command has to be timeout to be continued.',
-                command='',
-                metadata=CmdOutputMetadata(),
-            )
+            if command == '':
+                return CmdOutputObservation(
+                    content='ERROR: No previous running command to retrieve logs from.',
+                    command='',
+                    metadata=CmdOutputMetadata(),
+                )
+            if is_input:
+                return CmdOutputObservation(
+                    content='ERROR: No previous running command to interact with.',
+                    command='',
+                    metadata=CmdOutputMetadata(),
+                )
 
+        # Check if the command is a single command or multiple commands
         splited_commands = split_bash_commands(command)
         if len(splited_commands) > 1:
             return ErrorObservation(
                 content=(
-                    f'ERROR: Cannot execute multiple commands at once.\n'
-                    f'Please run each command separately OR chain them into a single command via && or ;\n'
-                    f'Provided commands:\n{"\n".join(f"({i+1}) {cmd}" for i, cmd in enumerate(splited_commands))}'
+                    f"ERROR: Cannot execute multiple commands at once.\n"
+                    f"Please run each command separately OR chain them into a single command via && or ;\n"
+                    f"Provided commands:\n{'\n'.join(f'({i + 1}) {cmd}' for i, cmd in enumerate(splited_commands))}"
                 )
             )
 
@@ -491,46 +509,62 @@ class BashSession:
         last_change_time = start_time
         last_pane_output = self._get_pane_content()
 
-        # Do not check hard timeout if the command is a special key
-        if command != '' and is_special_key:
-            logger.debug(f'SENDING SPECIAL KEY: {command!r}')
-            self.pane.send_keys(command, enter=False)
-        # When prev command is hard timeout, and we are trying to execute new command
-        elif self.prev_status == BashCommandStatus.HARD_TIMEOUT and command != '':
-            if not last_pane_output.endswith(CMD_OUTPUT_PS1_END):
-                _ps1_matches = CmdOutputMetadata.matches_ps1_metadata(last_pane_output)
-                raw_command_output = self._combine_outputs_between_matches(
-                    last_pane_output, _ps1_matches
-                )
-                metadata = CmdOutputMetadata()  # No metadata available
-                metadata.suffix = (
-                    f'\n[Your command "{command}" is NOT executed. '
-                    f'The previous command was timed out but still running. Above is the output of the previous command. '
-                    "You may wait longer to see additional output of the previous command by sending empty command '', "
-                    'send other commands to interact with the current process, '
-                    'or send keys ("C-c", "C-z", "C-d") to interrupt/kill the previous command before sending your new command.]'
-                )
-                command_output = self._get_command_output(
-                    command,
-                    raw_command_output,
-                    metadata,
-                    continue_prefix='[Below is the output of the previous command.]\n',
-                )
-                return CmdOutputObservation(
-                    command=command,
-                    content=command_output,
-                    metadata=metadata,
-                )
-        # Only send the command to the pane if it's not a special key and it's not empty
-        # AND previous hard timeout command is resolved
-        elif command != '' and not is_special_key:
-            # convert command to raw string
-            command = escape_bash_special_chars(command)
-            logger.debug(f'SENDING COMMAND: {command!r}')
-            self.pane.send_keys(
-                command,
-                enter=True,
+        # When prev command is still running, and we are trying to send a new command
+        if (
+            self.prev_status
+            in {
+                BashCommandStatus.HARD_TIMEOUT,
+                BashCommandStatus.NO_CHANGE_TIMEOUT,
+            }
+            and not last_pane_output.endswith(
+                CMD_OUTPUT_PS1_END
+            )  # prev command is not completed
+            and not is_input
+            and command != ''  # not input and not empty command
+        ):
+            _ps1_matches = CmdOutputMetadata.matches_ps1_metadata(last_pane_output)
+            raw_command_output = self._combine_outputs_between_matches(
+                last_pane_output, _ps1_matches
             )
+            metadata = CmdOutputMetadata()  # No metadata available
+            metadata.suffix = (
+                f'\n[Your command "{command}" is NOT executed. '
+                f'The previous command is still running - You CANNOT send new commands until the previous command is completed. '
+                'By setting `is_input` to `true`, you can interact with the current process: '
+                "You may wait longer to see additional output of the previous command by sending empty command '', "
+                'send other commands to interact with the current process, '
+                'or send keys ("C-c", "C-z", "C-d") to interrupt/kill the previous command before sending your new command.]'
+            )
+            logger.debug(f'PREVIOUS COMMAND OUTPUT: {raw_command_output}')
+            command_output = self._get_command_output(
+                command,
+                raw_command_output,
+                metadata,
+                continue_prefix='[Below is the output of the previous command.]\n',
+            )
+            return CmdOutputObservation(
+                command=command,
+                content=command_output,
+                metadata=metadata,
+            )
+
+        # Send actual command/inputs to the pane
+        if command != '':
+            is_special_key = self._is_special_key(command)
+            if is_input:
+                logger.debug(f'SENDING INPUT TO RUNNING PROCESS: {command!r}')
+                self.pane.send_keys(
+                    command,
+                    enter=not is_special_key,
+                )
+            else:
+                # convert command to raw string
+                command = escape_bash_special_chars(command)
+                logger.debug(f'SENDING COMMAND: {command!r}')
+                self.pane.send_keys(
+                    command,
+                    enter=not is_special_key,
+                )
 
         # Loop until the command completes or times out
         while should_continue():
@@ -540,8 +574,8 @@ class BashSession:
             logger.debug(
                 f'PANE CONTENT GOT after {time.time() - _start_time:.2f} seconds'
             )
-            logger.debug(f'BEGIN OF PANE CONTENT: {cur_pane_output.split("\n")[:10]}')
-            logger.debug(f'END OF PANE CONTENT: {cur_pane_output.split("\n")[-10:]}')
+            logger.debug(f"BEGIN OF PANE CONTENT: {cur_pane_output.split('\n')[:10]}")
+            logger.debug(f"END OF PANE CONTENT: {cur_pane_output.split('\n')[-10:]}")
             ps1_matches = CmdOutputMetadata.matches_ps1_metadata(cur_pane_output)
             if cur_pane_output != last_pane_output:
                 last_pane_output = cur_pane_output

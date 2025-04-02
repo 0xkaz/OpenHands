@@ -6,25 +6,29 @@ import multiprocessing as mp
 import os
 import pathlib
 import subprocess
-from typing import Awaitable, TextIO
+from typing import Any, Awaitable, TextIO
 
+from pydantic import SecretStr
 from tqdm import tqdm
 
-import openhands
 from openhands.core.config import LLMConfig
 from openhands.core.logger import openhands_logger as logger
-from openhands.resolver.github_issue import GithubIssue
+from openhands.resolver.interfaces.issue import Issue
 from openhands.resolver.resolve_issue import (
     issue_handler_factory,
     process_issue,
 )
 from openhands.resolver.resolver_output import ResolverOutput
+from openhands.resolver.utils import (
+    Platform,
+    identify_token,
+)
 
 
-def cleanup():
-    print('Cleaning up child processes...')
+def cleanup() -> None:
+    logger.info('Cleaning up child processes...')
     for process in mp.active_children():
-        print(f'Terminating child process: {process.name}')
+        logger.info(f'Terminating child process: {process.name}')
         process.terminate()
         process.join()
 
@@ -51,6 +55,7 @@ async def resolve_issues(
     repo: str,
     token: str,
     username: str,
+    platform: Platform,
     max_iterations: int,
     limit_issues: int | None,
     num_workers: int,
@@ -62,13 +67,13 @@ async def resolve_issues(
     repo_instruction: str | None,
     issue_numbers: list[int] | None,
 ) -> None:
-    """Resolve multiple github issues.
+    """Resolve multiple github or gitlab issues.
 
     Args:
-        owner: Github owner of the repo.
-        repo: Github repository to resolve issues in form of `owner/repo`.
-        token: Github token to access the repository.
-        username: Github username to access the repository.
+        owner: Github or Gitlab owner of the repo.
+        repo: Github or Gitlab repository to resolve issues in form of `owner/repo`.
+        token: Github or Gitlab token to access the repository.
+        username: Github or Gitlab username to access the repository.
         max_iterations: Maximum number of iterations to run.
         limit_issues: Limit the number of issues to resolve.
         num_workers: Number of workers to use for parallel processing.
@@ -80,10 +85,12 @@ async def resolve_issues(
         repo_instruction: Repository instruction to use.
         issue_numbers: List of issue numbers to resolve.
     """
-    issue_handler = issue_handler_factory(issue_type, owner, repo, token, llm_config)
+    issue_handler = issue_handler_factory(
+        issue_type, owner, repo, token, llm_config, platform
+    )
 
     # Load dataset
-    issues: list[GithubIssue] = issue_handler.get_converted_issues(
+    issues: list[Issue] = issue_handler.get_converted_issues(
         issue_numbers=issue_numbers
     )
 
@@ -103,11 +110,11 @@ async def resolve_issues(
     # checkout the repo
     repo_dir = os.path.join(output_dir, 'repo')
     if not os.path.exists(repo_dir):
-        checkout_output = subprocess.check_output(
+        checkout_output = subprocess.check_output(  # noqa: ASYNC101
             [
                 'git',
                 'clone',
-                f'https://{username}:{token}@github.com/{owner}/{repo}',
+                issue_handler.get_clone_url(),
                 f'{output_dir}/repo',
             ]
         ).decode('utf-8')
@@ -116,7 +123,7 @@ async def resolve_issues(
 
     # get the commit id of current repo for reproducibility
     base_commit = (
-        subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_dir)
+        subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_dir)  # noqa: ASYNC101
         .decode('utf-8')
         .strip()
     )
@@ -126,7 +133,7 @@ async def resolve_issues(
         # Check for .openhands_instructions file in the workspace directory
         openhands_instructions_path = os.path.join(repo_dir, '.openhands_instructions')
         if os.path.exists(openhands_instructions_path):
-            with open(openhands_instructions_path, 'r') as f:
+            with open(openhands_instructions_path, 'r') as f:  # noqa: ASYNC101
                 repo_instruction = f.read()
 
     # OUTPUT FILE
@@ -134,14 +141,14 @@ async def resolve_issues(
     logger.info(f'Writing output to {output_file}')
     finished_numbers = set()
     if os.path.exists(output_file):
-        with open(output_file, 'r') as f:
+        with open(output_file, 'r') as f:  # noqa: ASYNC101
             for line in f:
                 data = ResolverOutput.model_validate_json(line)
                 finished_numbers.add(data.issue.number)
         logger.warning(
             f'Output file {output_file} already exists. Loaded {len(finished_numbers)} finished issues.'
         )
-    output_fp = open(output_file, 'a')
+    output_fp = open(output_file, 'a')  # noqa: ASYNC101
 
     logger.info(
         f'Resolving issues with model {model_name}, max iterations {max_iterations}.'
@@ -174,13 +181,13 @@ async def resolve_issues(
                     f'Checking out to PR branch {issue.head_branch} for issue {issue.number}'
                 )
 
-                subprocess.check_output(
+                subprocess.check_output(  # noqa: ASYNC101
                     ['git', 'checkout', f'{issue.head_branch}'],
                     cwd=repo_dir,
                 )
 
                 base_commit = (
-                    subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_dir)
+                    subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_dir)  # noqa: ASYNC101
                     .decode('utf-8')
                     .strip()
                 )
@@ -188,6 +195,7 @@ async def resolve_issues(
             task = update_progress(
                 process_issue(
                     issue,
+                    platform,
                     base_commit,
                     max_iterations,
                     llm_config,
@@ -206,39 +214,41 @@ async def resolve_issues(
         # Use asyncio.gather with a semaphore to limit concurrency
         sem = asyncio.Semaphore(num_workers)
 
-        async def run_with_semaphore(task):
+        async def run_with_semaphore(task: Awaitable[Any]) -> Any:
             async with sem:
                 return await task
 
         await asyncio.gather(*[run_with_semaphore(task) for task in tasks])
 
     except KeyboardInterrupt:
-        print('KeyboardInterrupt received. Cleaning up...')
+        logger.info('KeyboardInterrupt received. Cleaning up...')
         cleanup()
 
     output_fp.close()
     logger.info('Finished.')
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Resolve multiple issues from Github.')
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description='Resolve multiple issues from Github or Gitlab.'
+    )
     parser.add_argument(
-        '--repo',
+        '--selected-repo',
         type=str,
         required=True,
-        help='Github repository to resolve issues in form of `owner/repo`.',
+        help='Github or Gitlab repository to resolve issues in form of `owner/repo`.',
     )
     parser.add_argument(
         '--token',
         type=str,
         default=None,
-        help='Github token to access the repository.',
+        help='Github or Gitlab token to access the repository.',
     )
     parser.add_argument(
         '--username',
         type=str,
         default=None,
-        help='Github username to access the repository.',
+        help='Github or Gitlab username to access the repository.',
     )
     parser.add_argument(
         '--runtime-container-image',
@@ -318,22 +328,26 @@ def main():
 
     runtime_container_image = my_args.runtime_container_image
     if runtime_container_image is None:
-        runtime_container_image = (
-            f'ghcr.io/all-hands-ai/runtime:{openhands.__version__}-nikolaik'
-        )
+        runtime_container_image = 'ghcr.io/all-hands-ai/runtime:0.30.0-nikolaik'
 
-    owner, repo = my_args.repo.split('/')
-    token = my_args.token if my_args.token else os.getenv('GITHUB_TOKEN')
-    username = my_args.username if my_args.username else os.getenv('GITHUB_USERNAME')
+    owner, repo = my_args.selected_repo.split('/')
+    token = my_args.token or os.getenv('GITHUB_TOKEN') or os.getenv('GITLAB_TOKEN')
+    username = my_args.username if my_args.username else os.getenv('GIT_USERNAME')
     if not username:
-        raise ValueError('Github username is required.')
+        raise ValueError('Username is required.')
 
     if not token:
-        raise ValueError('Github token is required.')
+        raise ValueError('Token is required.')
+
+    platform = identify_token(token, my_args.selected_repo)
+    if platform == Platform.INVALID:
+        raise ValueError('Token is invalid.')
+
+    api_key = my_args.llm_api_key or os.environ['LLM_API_KEY']
 
     llm_config = LLMConfig(
         model=my_args.llm_model or os.environ['LLM_MODEL'],
-        api_key=my_args.llm_api_key or os.environ['LLM_API_KEY'],
+        api_key=SecretStr(api_key) if api_key else None,
         base_url=my_args.llm_base_url or os.environ.get('LLM_BASE_URL', None),
     )
 
@@ -368,6 +382,7 @@ def main():
             repo=repo,
             token=token,
             username=username,
+            platform=platform,
             runtime_container_image=runtime_container_image,
             max_iterations=my_args.max_iterations,
             limit_issues=my_args.limit_issues,
